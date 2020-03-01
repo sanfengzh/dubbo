@@ -57,40 +57,51 @@ import java.util.regex.Pattern;
  * @see com.alibaba.dubbo.common.extension.Activate
  */
 public class ExtensionLoader<T> {
-
+    // 日志
     private static final Logger logger = LoggerFactory.getLogger(ExtensionLoader.class);
-
+    // JDK spi扩展机制中配置文件的路径，dubbo为了兼容jdk spi
     private static final String SERVICES_DIRECTORY = "META-INF/services/";
-
+    // 用于用户自定义的扩展实现配置文件存放路径
     private static final String DUBBO_DIRECTORY = "META-INF/dubbo/";
-
+    // 用于dubbo内部提供的扩展实现配置文件存放路径
     private static final String DUBBO_INTERNAL_DIRECTORY = DUBBO_DIRECTORY + "internal/";
 
     private static final Pattern NAME_SEPARATOR = Pattern.compile("\\s*[,]+\\s*");
-
+    // 扩展加载器集合，key是扩展接口，如Protocol等
     private static final ConcurrentMap<Class<?>, ExtensionLoader<?>> EXTENSION_LOADERS = new ConcurrentHashMap<Class<?>, ExtensionLoader<?>>();
-
+    // 扩展实现集合，key为扩展实现类，value为扩展对象
+    // 例如key为Class<DubboProtocol>，value为DubboProtocol对象
     private static final ConcurrentMap<Class<?>, Object> EXTENSION_INSTANCES = new ConcurrentHashMap<Class<?>, Object>();
 
     // ==============================
-
+    // 扩展接口，如Protocol等
     private final Class<?> type;
-
+    // 对象工厂，获得扩展实现的实例，用于injectExtension方法中将扩展实现类的实例注入到相关的依赖属性
+    // 如StubProxyFactoryWrapper类中有 Protocol protocol 属性，就是通过set方法，把Protocol的实现类实例赋值
     private final ExtensionFactory objectFactory;
 
+    // 以下提到的扩展名就是在配置文件中的key值，如"dubbo"等
+
+    // 换成扩展名和扩展类映射，和cachedClasses的key和value对换
     private final ConcurrentMap<Class<?>, String> cachedNames = new ConcurrentHashMap<Class<?>, String>();
-
+    // 缓存扩展实现类集合
     private final Holder<Map<String, Class<?>>> cachedClasses = new Holder<Map<String, Class<?>>>();
-
+    // 扩展名与加有@Activate的自动激活类的映射
     private final Map<String, Activate> cachedActivates = new ConcurrentHashMap<String, Activate>();
+    // 缓存的扩展对象的集合，key是扩展名，value是扩展对象
+    // 如果Protocol扩展，key是dubool，value是DubboProtocol
     private final ConcurrentMap<String, Holder<Object>> cachedInstances = new ConcurrentHashMap<String, Holder<Object>>();
+    // 缓存的自适应（Adaptive）扩展对象，例如AdaptiveExtensionFactory类的对象
     private final Holder<Object> cachedAdaptiveInstance = new Holder<Object>();
+    // 缓存的自适应扩展对象的类，例如AdaptiveExtensionFactory类
     private volatile Class<?> cachedAdaptiveClass = null;
+    // 缓存的默认扩展名，就是@SPI中设置的值
     private String cachedDefaultName;
+    // 创建createdAdaptiveInstance异常
     private volatile Throwable createAdaptiveInstanceError;
-
+    // 扩展Wrapper实现类集合
     private Set<Class<?>> cachedWrapperClasses;
-
+    // 扩展名与加载对应扩展类发生的异常的集合
     private Map<String, IllegalStateException> exceptions = new ConcurrentHashMap<String, IllegalStateException>();
 
     private ExtensionLoader(Class<?> type) {
@@ -104,17 +115,21 @@ public class ExtensionLoader<T> {
 
     @SuppressWarnings("unchecked")
     public static <T> ExtensionLoader<T> getExtensionLoader(Class<T> type) {
+        // 扩展点接口为空，抛出异常
         if (type == null)
             throw new IllegalArgumentException("Extension type == null");
+        // type不是个接口类，抛出异常
         if (!type.isInterface()) {
             throw new IllegalArgumentException("Extension type(" + type + ") is not interface!");
         }
+        // 判断是否是一个可扩展接口，不是抛出异常
         if (!withExtensionAnnotation(type)) {
             throw new IllegalArgumentException("Extension type(" + type +
                     ") is not extension, because WITHOUT @" + SPI.class.getSimpleName() + " Annotation!");
         }
-
+        // 从扩展加载器集合中取出扩展接口对应的扩展加载器
         ExtensionLoader<T> loader = (ExtensionLoader<T>) EXTENSION_LOADERS.get(type);
+        // 如果为空，则创建该扩展接口的扩展加载器，并且添加到EXTENSION_LOADERS
         if (loader == null) {
             EXTENSION_LOADERS.putIfAbsent(type, new ExtensionLoader<T>(type));
             loader = (ExtensionLoader<T>) EXTENSION_LOADERS.get(type);
@@ -141,6 +156,8 @@ public class ExtensionLoader<T> {
      * @param key url parameter key which used to get extension point names
      * @return extension list which are activated.
      * @see #getActivateExtension(com.alibaba.dubbo.common.URL, String, String)
+     *
+     * 获得符合自动激活条件的扩展实现类对象集合（适用没有group条件的自动激活类）
      */
     public List<T> getActivateExtension(URL url, String key) {
         return getActivateExtension(url, key, null);
@@ -166,6 +183,8 @@ public class ExtensionLoader<T> {
      * @param group group
      * @return extension list which are activated.
      * @see #getActivateExtension(com.alibaba.dubbo.common.URL, String[], String)
+     *
+     * 获得符合自动激活条件的扩展实现类对象集合（适用含有value和group条件的自动激活类）
      */
     public List<T> getActivateExtension(URL url, String key, String group) {
         String value = url.getParameter(key);
@@ -180,15 +199,20 @@ public class ExtensionLoader<T> {
      * @param group  group
      * @return extension list which are activated
      * @see com.alibaba.dubbo.common.extension.Activate
+     *
+     * 获取自动激活的扩展对象
      */
     public List<T> getActivateExtension(URL url, String[] values, String group) {
         List<T> exts = new ArrayList<T>();
         List<String> names = values == null ? new ArrayList<String>(0) : Arrays.asList(values);
+        // 判断不存在配置 "-name" ，例如 <dubbo:service filter="-default" />  代表移除所有默认过滤器
         if (!names.contains(Constants.REMOVE_VALUE_PREFIX + Constants.DEFAULT_KEY)) {
+            // 获得扩展实现类数组，把扩展实现类放到cachedClasses中
             getExtensionClasses();
             for (Map.Entry<String, Activate> entry : cachedActivates.entrySet()) {
                 String name = entry.getKey();
                 Activate activate = entry.getValue();
+                // 判断group值是否存在所有自动激活类中group组中，匹配分组
                 if (isMatchGroup(group, activate.group())) {
                     T ext = getExtension(name);
                     if (!names.contains(name)
